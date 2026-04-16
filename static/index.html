@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Hermes Chat</title>
+  <script src="/static/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0d0d;
+      --surface: #1a1a1a;
+      --surface2: #222;
+      --accent: #00ff88;
+      --text: #e0e0e0;
+      --muted: #666;
+      --border: #2a2a2a;
+      --user-bubble: #1e3a2a;
+      --sidebar-w: 260px;
+    }
+
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Menlo', 'Monaco', 'Consolas', monospace; font-size: 14px; overflow: hidden; }
+
+    /* ── Login overlay ── */
+    #login-overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: var(--bg);
+      display: flex; align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    #login-overlay.hidden { display: none; }
+    .login-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 40px;
+      width: 100%; max-width: 320px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    .login-box h1 { color: var(--accent); font-size: 20px; letter-spacing: 1px; }
+    .login-box input[type=password] {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      padding: 10px 12px; border-radius: 4px; width: 100%; font-family: inherit; font-size: 16px;
+      outline: none;
+    }
+    .login-box input[type=password]:focus { border-color: var(--accent); }
+    .login-box button {
+      background: var(--accent); color: #000; border: none; border-radius: 4px;
+      padding: 10px; font-family: inherit; font-size: 14px; font-weight: bold;
+      cursor: pointer; transition: opacity .15s;
+    }
+    .login-box button:hover { opacity: .85; }
+    #login-error { color: #ff4466; font-size: 13px; min-height: 18px; }
+
+    /* ── App layout ── */
+    #app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
+    #app.hidden { display: none; }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      width: var(--sidebar-w);
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    #new-session-btn {
+      flex: 1;
+      background: transparent; border: 1px solid var(--accent); color: var(--accent);
+      padding: 7px 12px; border-radius: 4px; font-family: inherit; font-size: 13px;
+      cursor: pointer; transition: background .15s, color .15s;
+    }
+    #new-session-btn:hover { background: var(--accent); color: #000; }
+    #session-list {
+      flex: 1; overflow-y: auto; padding: 8px 0;
+    }
+    #session-list::-webkit-scrollbar { width: 4px; }
+    #session-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .session-item {
+      padding: 10px 14px; cursor: pointer; border-left: 3px solid transparent;
+      transition: background .1s, border-color .1s;
+    }
+    .session-item:hover { background: var(--surface2); }
+    .session-item.active { background: var(--surface2); border-left-color: var(--accent); }
+    .session-title { color: var(--text); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .session-date { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+    /* ── Main area ── */
+    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* top bar (mobile hamburger) */
+    #topbar {
+      display: none;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 12px;
+      align-items: center; gap: 10px;
+    }
+    #hamburger {
+      background: none; border: none; color: var(--text); font-size: 20px; cursor: pointer; line-height: 1;
+    }
+    #topbar-title { color: var(--accent); font-size: 15px; font-weight: bold; }
+
+    /* thread */
+    #thread {
+      flex: 1; overflow-y: auto; padding: 24px 16px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    #thread::-webkit-scrollbar { width: 6px; }
+    #thread::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .msg { display: flex; flex-direction: column; max-width: 80%; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .bubble {
+      padding: 10px 14px; border-radius: 8px; line-height: 1.6;
+      word-break: break-word;
+    }
+    .msg.user .bubble {
+      background: var(--user-bubble); border: 1px solid #2a5a3a;
+      color: var(--text); white-space: pre-wrap;
+    }
+    .msg.assistant .bubble {
+      background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    }
+
+    /* markdown inside assistant bubbles */
+    .bubble h1, .bubble h2, .bubble h3 { margin: .6em 0 .3em; color: var(--accent); }
+    .bubble p { margin: .4em 0; }
+    .bubble ul, .bubble ol { margin: .4em 0 .4em 1.4em; }
+    .bubble li { margin: .2em 0; }
+    .bubble code {
+      background: #111; border: 1px solid var(--border);
+      padding: 1px 5px; border-radius: 3px; font-family: inherit; font-size: 13px;
+    }
+    .bubble pre {
+      background: #111; border: 1px solid var(--border);
+      padding: 12px; border-radius: 6px; overflow-x: auto; margin: .6em 0;
+    }
+    .bubble pre code { background: none; border: none; padding: 0; }
+    .bubble blockquote {
+      border-left: 3px solid var(--accent); padding-left: 10px;
+      color: var(--muted); margin: .4em 0;
+    }
+    .bubble a { color: var(--accent); }
+    .bubble table { border-collapse: collapse; width: 100%; margin: .6em 0; }
+    .bubble th, .bubble td { border: 1px solid var(--border); padding: 6px 10px; }
+    .bubble th { background: var(--surface2); }
+
+    /* timestamp tooltip on hover */
+    .bubble[data-ts] { position: relative; }
+    .bubble[data-ts]:hover::after {
+      content: attr(data-ts);
+      position: absolute;
+      bottom: calc(100% + 6px);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+      padding: 3px 8px;
+      border-radius: 4px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .msg.user .bubble[data-ts]:hover::after { right: 0; }
+    .msg.assistant .bubble[data-ts]:hover::after { left: 0; }
+
+    /* thinking indicator */
+    #thinking {
+      align-self: flex-start; color: var(--muted); font-size: 13px;
+      padding: 6px 14px; animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity: .4; } 50% { opacity: 1; } }
+
+    /* input area */
+    #input-area {
+      border-top: 1px solid var(--border);
+      padding: 12px 16px;
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      display: flex; gap: 8px; align-items: flex-end;
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    #msg-input {
+      flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      padding: 10px 12px; border-radius: 6px; font-family: inherit; font-size: 14px;
+      resize: none; min-height: 42px; max-height: 200px; overflow-y: auto;
+      outline: none; line-height: 1.5;
+    }
+    #msg-input:focus { border-color: var(--accent); }
+    #send-btn {
+      background: var(--accent); color: #000; border: none; border-radius: 6px;
+      padding: 10px 18px; font-family: inherit; font-size: 14px; font-weight: bold;
+      cursor: pointer; transition: opacity .15s; white-space: nowrap; flex-shrink: 0;
+      height: 42px;
+    }
+    #send-btn:hover:not(:disabled) { opacity: .85; }
+    #send-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* Mobile overlay sidebar */
+    #sidebar-overlay {
+      display: none;
+      position: fixed; inset: 0; z-index: 50;
+      background: rgba(0,0,0,.6);
+    }
+    @media (max-width: 767px) {
+      #sidebar {
+        position: fixed; inset: 0 auto 0 0; z-index: 60;
+        transform: translateX(-100%);
+        transition: transform .25s ease;
+        width: 280px;
+      }
+      #sidebar.open { transform: translateX(0); }
+      #sidebar-overlay.open { display: block; }
+      #topbar { display: flex; }
+      .msg { max-width: 95%; }
+      #thread { padding: 12px 10px; }
+      #input-area { padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+      #msg-input { font-size: 16px; /* prevent iOS zoom on focus */ }
+      .login-box { padding: 28px 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Login overlay -->
+<div id="login-overlay">
+  <div class="login-box">
+    <h1>hermes-proxy</h1>
+    <input type="password" id="pw-input" placeholder="Password"
+      autocomplete="new-password"
+      data-lpignore="true"
+      data-1p-ignore="true"
+      data-bwignore="true" />
+    <button id="login-btn">Login</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- Main app -->
+<div id="app" class="hidden">
+  <!-- Mobile overlay background -->
+  <div id="sidebar-overlay"></div>
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <button id="new-session-btn">+ New</button>
+    </div>
+    <div id="session-list"></div>
+  </div>
+
+  <!-- Main -->
+  <div id="main">
+    <div id="topbar">
+      <button id="hamburger">&#9776;</button>
+      <span id="topbar-title">hermes</span>
+    </div>
+    <div id="thread"></div>
+    <div id="input-area">
+      <textarea id="msg-input" placeholder="Message hermes…" rows="1"></textarea>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ── State ──
+  let currentSessionId = null;
+  let streaming = false;
+
+  // ── DOM refs ──
+  const loginOverlay = document.getElementById('login-overlay');
+  const appEl = document.getElementById('app');
+  const pwInput = document.getElementById('pw-input');
+  const loginBtn = document.getElementById('login-btn');
+  const loginError = document.getElementById('login-error');
+  const sessionList = document.getElementById('session-list');
+  const thread = document.getElementById('thread');
+  const msgInput = document.getElementById('msg-input');
+  const sendBtn = document.getElementById('send-btn');
+  const newSessionBtn = document.getElementById('new-session-btn');
+  const hamburger = document.getElementById('hamburger');
+  const sidebar = document.getElementById('sidebar');
+  const sidebarOverlay = document.getElementById('sidebar-overlay');
+
+  // ── Utilities ──
+  function closeSidebar() {
+    sidebar.classList.remove('open');
+    sidebarOverlay.classList.remove('open');
+  }
+  function openSidebar() {
+    sidebar.classList.add('open');
+    sidebarOverlay.classList.add('open');
+  }
+  hamburger.addEventListener('click', openSidebar);
+  sidebarOverlay.addEventListener('click', closeSidebar);
+
+  function scrollToBottom() {
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  function formatDate(ts) {
+    if (!ts) return '';
+    try {
+      const d = new Date(ts.includes('T') || ts.includes('Z') ? ts : ts + 'Z');
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch { return ''; }
+  }
+
+  // Auto-resize textarea
+  msgInput.addEventListener('input', () => {
+    msgInput.style.height = 'auto';
+    msgInput.style.height = Math.min(msgInput.scrollHeight, 200) + 'px';
+  });
+
+  // Enter = send, Shift+Enter = newline
+  msgInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!streaming) sendMessage();
+    }
+  });
+
+  // ── Login ──
+  async function checkAuth() {
+    const res = await fetch('/auth/status');
+    const data = await res.json();
+    if (data.authenticated) {
+      showApp();
+    } else {
+      loginOverlay.classList.remove('hidden');
+    }
+  }
+
+  async function doLogin() {
+    loginError.textContent = '';
+    const pw = pwInput.value;
+    const res = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    if (res.ok) {
+      loginOverlay.classList.add('hidden');
+      // Reset any iOS zoom that may have been triggered by the password field
+      const mv = document.querySelector('meta[name=viewport]');
+      if (mv) {
+        mv.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
+      }
+      showApp();
+    } else if (res.status === 401) {
+      loginError.textContent = 'Wrong password';
+    } else if (res.status === 429) {
+      loginError.textContent = 'Too many attempts — wait 60 s';
+    } else {
+      loginError.textContent = 'Login failed';
+    }
+  }
+
+  loginBtn.addEventListener('click', doLogin);
+  pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+  function showApp() {
+    loginOverlay.classList.add('hidden');
+    appEl.classList.remove('hidden');
+    loadSessions();
+  }
+
+  // ── Sessions ──
+  async function loadSessions() {
+    try {
+      const res = await fetch('/api/sessions');
+      if (!res.ok) return;
+      const sessions = await res.json();
+      renderSessions(sessions);
+    } catch {}
+  }
+
+  function renderSessions(sessions) {
+    sessionList.innerHTML = '';
+    for (const s of sessions) {
+      const el = document.createElement('div');
+      el.className = 'session-item' + (s.id === currentSessionId ? ' active' : '');
+      el.dataset.id = s.id;
+      const title = s.title || s.id.slice(0, 16) + '…';
+      el.innerHTML = `<div class="session-title">${esc(title)}</div>
+        <div class="session-date">${esc(formatDate(s.started_at))}</div>`;
+      el.addEventListener('click', () => loadSession(s.id));
+      sessionList.appendChild(el);
+    }
+    sessionList.scrollTop = 0;
+  }
+
+  async function loadSession(id) {
+    currentSessionId = id;
+    closeSidebar();
+    updateActiveSession();
+    thread.innerHTML = '';
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/messages`);
+      if (!res.ok) return;
+      const messages = await res.json();
+      for (const m of messages) {
+        appendMessage(m.role, m.content, false, m.timestamp);
+      }
+      scrollToBottom();
+    } catch {}
+  }
+
+  function updateActiveSession() {
+    document.querySelectorAll('.session-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.id === currentSessionId);
+    });
+  }
+
+  newSessionBtn.addEventListener('click', () => {
+    currentSessionId = null;
+    thread.innerHTML = '';
+    updateActiveSession();
+    closeSidebar();
+    msgInput.focus();
+  });
+
+  // ── Message rendering ──
+  function esc(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function formatTime(ts) {
+    if (!ts) return '';
+    try {
+      // ts can be a Unix float (from DB) or ms timestamp (from Date.now())
+      const ms = ts > 1e11 ? ts : ts * 1000;
+      const d = new Date(ms);
+      return d.toLocaleString(undefined, {
+        month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+    } catch { return ''; }
+  }
+
+  function appendMessage(role, content, streaming = false, ts = null) {
+    const msg = document.createElement('div');
+    msg.className = `msg ${role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    if (role === 'assistant') {
+      bubble.innerHTML = content ? marked.parse(content) : '';
+    } else {
+      bubble.textContent = content || '';
+    }
+    if (ts) bubble.dataset.ts = formatTime(ts);
+    msg.appendChild(bubble);
+    thread.appendChild(msg);
+    scrollToBottom();
+    return bubble;
+  }
+
+  function showThinking() {
+    const msg = document.createElement('div');
+    msg.id = 'thinking-indicator';
+    msg.className = 'msg assistant';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.style.cssText = 'color:var(--accent);letter-spacing:3px;animation:pulse 1.2s ease-in-out infinite;';
+    bubble.textContent = '● ● ●';
+    msg.appendChild(bubble);
+    thread.appendChild(msg);
+    scrollToBottom();
+    return msg;
+  }
+
+  function removeThinking() {
+    const el = document.getElementById('thinking-indicator');
+    if (el) el.remove();
+  }
+
+  // ── SSE parsing ──
+  function parseSSEChunks(text) {
+    const chunks = text.split('\n\n');
+    const results = [];
+    for (const chunk of chunks) {
+      const lines = chunk.split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const json = JSON.parse(data);
+          const delta = json?.choices?.[0]?.delta?.content;
+          if (delta) results.push(delta);
+        } catch {}
+      }
+    }
+    return results;
+  }
+
+  // ── Send ──
+  sendBtn.addEventListener('click', sendMessage);
+
+  async function sendMessage() {
+    const text = msgInput.value.trim();
+    if (!text || streaming) return;
+
+    streaming = true;
+    sendBtn.disabled = true;
+    msgInput.value = '';
+    msgInput.style.height = 'auto';
+
+    appendMessage('user', text, false, Date.now());
+    const thinkingEl = showThinking();
+
+    let assistantBubble = null;
+    let assistantContent = '';
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, session_id: currentSessionId }),
+      });
+
+      if (!res.ok) {
+        removeThinking();
+        appendMessage('assistant', '_(Error contacting server)_');
+        return;
+      }
+
+      // Capture session id from response headers
+      const newSessionId = res.headers.get('X-Hermes-Session-Id');
+      if (newSessionId) {
+        const wasNew = !currentSessionId;
+        currentSessionId = newSessionId;
+        if (wasNew) await loadSessions();
+        updateActiveSession();
+      }
+
+      const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE events (split on double newline)
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop(); // keep incomplete last part
+
+        for (const part of parts) {
+          const lines = part.split('\n');
+          let eventType = 'message';
+          let dataLine = null;
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              eventType = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              dataLine = line.slice(5).trim();
+            }
+          }
+          if (!dataLine || dataLine === '[DONE]') continue;
+          try {
+            const json = JSON.parse(dataLine);
+            if (eventType === 'session' && json.hermes_session_id) {
+              // Capture session ID emitted by proxy at end of stream
+              currentSessionId = json.hermes_session_id;
+              await loadSessions();
+              updateActiveSession();
+            } else {
+              const delta = json?.choices?.[0]?.delta?.content;
+              if (delta) {
+                if (!assistantBubble) {
+                  removeThinking();
+                  const msg = document.createElement('div');
+                  msg.className = 'msg assistant';
+                  assistantBubble = document.createElement('div');
+                  assistantBubble.className = 'bubble';
+                  assistantBubble.dataset.ts = formatTime(Date.now());
+                  msg.appendChild(assistantBubble);
+                  thread.appendChild(msg);
+                }
+                assistantContent += delta;
+                assistantBubble.innerHTML = marked.parse(assistantContent);
+                scrollToBottom();
+              }
+            }
+          } catch {}
+        }
+      }
+
+      // Process any remaining buffer
+      if (buffer) {
+        const lines = buffer.split('\n');
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const json = JSON.parse(data);
+            const delta = json?.choices?.[0]?.delta?.content;
+            if (delta) {
+              assistantContent += delta;
+              if (assistantBubble) {
+                assistantBubble.innerHTML = marked.parse(assistantContent);
+                scrollToBottom();
+              }
+            }
+          } catch {}
+        }
+      }
+
+      // Final render (ensure complete markdown)
+      if (assistantBubble && assistantContent) {
+        assistantBubble.innerHTML = marked.parse(assistantContent);
+      }
+
+      // Refresh sessions after first message in new session
+      if (newSessionId) await loadSessions();
+
+    } catch (err) {
+      removeThinking();
+      if (!assistantBubble) {
+        appendMessage('assistant', '_(Stream error)_');
+      }
+    } finally {
+      streaming = false;
+      sendBtn.disabled = false;
+      msgInput.focus();
+    }
+  }
+
+  // ── Boot ──
+  checkAuth();
+})();
+</script>
+</body>
+</html>
