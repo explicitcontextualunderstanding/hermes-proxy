@@ -60,8 +60,9 @@ _SIGNING_KEY = hashlib.pbkdf2_hmac(
 # ---------------------------------------------------------------------------
 browser_sessions = {}  # type: dict  # cookie_token -> hermes_session_id
 
-# Session ID format: UUID-like hex strings produced by Hermes state DB
-_SESSION_ID_RE = re.compile(r'^[0-9a-f-]{36,72}$')
+# Session ID format: hermes api_server produces "api-<16 hex chars>"
+# CLI sessions use "YYYYMMDD_HHMMSS_<6hex>". Allow word chars + hyphens, 8-80 chars.
+_SESSION_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{8,80}$')
 
 # Rate limiting: { ip: {"count": int, "window_start": float} }
 _login_attempts = {}  # type: dict
