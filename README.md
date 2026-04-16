@@ -170,7 +170,34 @@ This makes the proxy available at `https://<machine-name>.<tailnet>.ts.net` with
 
 ---
 
-## Architecture
+## Security Notes
+
+### Password strength
+`HERMES_PROXY_PASSWORD` is used to derive the cookie signing key via PBKDF2 (100,000 iterations). Choose a strong password — this is your only authentication factor. Rotating it invalidates all existing login cookies automatically (users re-login once).
+
+Note: PBKDF2 key derivation adds ~100ms to startup time. This is expected and intentional.
+
+### Session trust boundary
+hermes-proxy is designed as a single-user tool. An authenticated user can point the proxy at any Hermes session ID in the database. If you expose this to multiple users, add per-user session isolation before deploying.
+
+### Upgrading marked.js or DOMPurify
+Both libraries are loaded from jsDelivr CDN with pinned versions and SRI hashes. To upgrade:
+
+1. Update the version number in the `src` URL
+2. Download the new file and recompute the hash:
+   ```bash
+   curl -s "https://cdn.jsdelivr.net/npm/marked@<version>/marked.min.js" -o /tmp/marked.min.js
+   openssl dgst -sha384 -binary /tmp/marked.min.js | openssl base64 -A
+   ```
+3. Replace the `integrity` attribute value in `static/index.html`
+4. Update the version comment on the same line
+
+### Deployment hardening
+- Always run behind TLS (Tailscale Serve, Caddy, nginx) — the auth cookie requires HTTPS (`Secure` flag)
+- Bind to `127.0.0.1`, not `0.0.0.0` — let your TLS layer handle external exposure
+- The proxy binds localhost-only by default; do not expose port 8643 directly to the internet
+
+---
 
 ```
 Browser
