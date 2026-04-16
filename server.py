@@ -273,34 +273,33 @@ async def api_sessions(request: Request) -> Response:
         return _auth_error()
 
     try:
-        conn = sqlite3.connect(_STATE_DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        # Pull first user message to use as title when title is NULL.
-        # Exclude Open WebUI system-generated sessions (### Task: prefix).
-        cur.execute(
-            """
-            SELECT s.id, s.title, s.started_at, s.ended_at, s.message_count, s.model,
-                   (SELECT m.content FROM messages m
-                    WHERE m.session_id = s.id AND m.role = 'user'
-                    ORDER BY m.timestamp ASC LIMIT 1) AS first_msg
-            FROM sessions s
-            WHERE s.source = 'api_server'
-            ORDER BY s.started_at DESC LIMIT 50
-            """
-        )
-        rows = []
-        for row in cur.fetchall():
-            r = dict(row)
-            first_msg = r.pop("first_msg", None) or ""
-            # Skip Open WebUI system sessions
-            if first_msg.startswith("### Task:"):
-                continue
-            # Use first user message as display title when DB title is absent
-            if not r.get("title") and first_msg:
-                r["title"] = first_msg[:72].strip()
-            rows.append(r)
-        conn.close()
+        with sqlite3.connect(_STATE_DB_PATH, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            # Pull first user message to use as title when title is NULL.
+            # Exclude Open WebUI system-generated sessions (### Task: prefix).
+            cur.execute(
+                """
+                SELECT s.id, s.title, s.started_at, s.ended_at, s.message_count, s.model,
+                       (SELECT m.content FROM messages m
+                        WHERE m.session_id = s.id AND m.role = 'user'
+                        ORDER BY m.timestamp ASC LIMIT 1) AS first_msg
+                FROM sessions s
+                WHERE s.source = 'api_server'
+                ORDER BY s.started_at DESC LIMIT 50
+                """
+            )
+            rows = []
+            for row in cur.fetchall():
+                r = dict(row)
+                first_msg = r.pop("first_msg", None) or ""
+                # Skip Open WebUI system sessions
+                if first_msg.startswith("### Task:"):
+                    continue
+                # Use first user message as display title when DB title is absent
+                if not r.get("title") and first_msg:
+                    r["title"] = first_msg[:72].strip()
+                rows.append(r)
         return JSONResponse(rows)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -312,18 +311,17 @@ async def api_session_messages(session_id: str, request: Request) -> Response:
         return _auth_error()
 
     try:
-        conn = sqlite3.connect(_STATE_DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT role, content, timestamp FROM messages "
-            "WHERE session_id = ? AND role IN ('user', 'assistant') "
-            "AND content IS NOT NULL AND content != '' "
-            "ORDER BY timestamp ASC",
-            (session_id,),
-        )
-        rows = [dict(row) for row in cur.fetchall()]
-        conn.close()
+        with sqlite3.connect(_STATE_DB_PATH, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT role, content, timestamp FROM messages "
+                "WHERE session_id = ? AND role IN ('user', 'assistant') "
+                "AND content IS NOT NULL AND content != '' "
+                "ORDER BY timestamp ASC",
+                (session_id,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
         return JSONResponse(rows)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
