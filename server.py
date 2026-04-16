@@ -15,6 +15,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Load .env manually (no python-dotenv dependency)
 # ---------------------------------------------------------------------------
@@ -302,7 +304,8 @@ async def api_sessions(request: Request) -> Response:
                 rows.append(r)
         return JSONResponse(rows)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.error("DB error in api_sessions: %s", exc)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 @app.get("/api/sessions/{session_id}/messages")
@@ -324,7 +327,8 @@ async def api_session_messages(session_id: str, request: Request) -> Response:
             rows = [dict(row) for row in cur.fetchall()]
         return JSONResponse(rows)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.error("DB error in api_session_messages: %s", exc)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ---------------------------------------------------------------------------
