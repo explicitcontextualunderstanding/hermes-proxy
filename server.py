@@ -39,10 +39,16 @@ if not _HERMES_PROXY_PASSWORD:
 if not _API_SERVER_KEY:
     raise RuntimeError("API_SERVER_KEY is unset or empty — refusing to start")
 
-# Stable signing key derived from password.
-# Tokens are HMAC-signed so they survive proxy restarts — no server-side token store needed.
+# Signing key derived via PBKDF2 — slows offline brute-force against captured tokens.
+# Fixed salt is intentional: purpose is KDF, not password storage.
 # Rotating the password invalidates all existing cookies automatically.
-_SIGNING_KEY = hashlib.sha256(_HERMES_PROXY_PASSWORD.encode()).digest()
+# Note: ~100ms startup cost for the KDF derivation is expected and intentional.
+_SIGNING_KEY = hashlib.pbkdf2_hmac(
+    'sha256',
+    _HERMES_PROXY_PASSWORD.encode(),
+    b'hermes-proxy-signing-key',
+    iterations=100_000,
+)
 
 # ---------------------------------------------------------------------------
 # In-memory state
