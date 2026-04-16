@@ -1,7 +1,9 @@
 import hashlib
 import hmac
 import json as _json
+import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -54,6 +56,9 @@ _SIGNING_KEY = hashlib.pbkdf2_hmac(
 # In-memory state
 # ---------------------------------------------------------------------------
 browser_sessions = {}  # type: dict  # cookie_token -> hermes_session_id
+
+# Session ID format: UUID-like hex strings produced by Hermes state DB
+_SESSION_ID_RE = re.compile(r'^[0-9a-f-]{36,72}$')
 
 # Rate limiting: { ip: {"count": int, "window_start": float} }
 _login_attempts = {}  # type: dict
@@ -200,6 +205,8 @@ async def api_chat(request: Request) -> Response:
 
     if "session_id" in body:
         if session_id_override:
+            if not _SESSION_ID_RE.match(str(session_id_override)):
+                return JSONResponse({"error": "Invalid session_id"}, status_code=400)
             browser_sessions[token] = session_id_override
         else:
             # Explicit null = new session requested, clear the mapping
