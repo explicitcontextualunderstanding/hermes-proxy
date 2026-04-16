@@ -484,7 +484,7 @@
       if (!res.ok) return;
       const messages = await res.json();
       for (const m of messages) {
-        appendMessage(m.role, m.content, false, m.timestamp);
+        appendMessage(m.role, m.content, m.timestamp);
       }
       scrollToBottom();
     } catch {}
@@ -528,7 +528,7 @@
     } catch { return ''; }
   }
 
-  function appendMessage(role, content, streaming = false, ts = null) {
+  function appendMessage(role, content, ts = null) {
     const msg = document.createElement('div');
     msg.className = `msg ${role}`;
     const bubble = document.createElement('div');
@@ -564,26 +564,6 @@
     if (el) el.remove();
   }
 
-  // ── SSE parsing ──
-  function parseSSEChunks(text) {
-    const chunks = text.split('\n\n');
-    const results = [];
-    for (const chunk of chunks) {
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const json = JSON.parse(data);
-          const delta = json?.choices?.[0]?.delta?.content;
-          if (delta) results.push(delta);
-        } catch {}
-      }
-    }
-    return results;
-  }
-
   // ── Send ──
   sendBtn.addEventListener('click', sendMessage);
 
@@ -597,8 +577,8 @@
     msgInput.style.height = 'auto';
     dismissSessionLostBanner();
 
-    appendMessage('user', text, false, Date.now());
-    const thinkingEl = showThinking();
+    appendMessage('user', text, Date.now());
+    showThinking();
 
     let assistantBubble = null;
     let assistantContent = '';
