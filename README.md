@@ -4,8 +4,6 @@ A lightweight chat frontend and reverse proxy for [Hermes Agent](https://github.
 
 Hermes ships with a management dashboard (`:9119`) but no chat UI. hermes-proxy fills that gap: it sits in front of the Hermes `api_server` platform, handles authentication, and serves a minimal browser-based chat interface with session history, SSE streaming, and mobile support.
 
-![screenshot placeholder](docs/screenshot.png)
-
 ---
 
 ## Features
@@ -18,7 +16,7 @@ Hermes ships with a management dashboard (`:9119`) but no chat UI. hermes-proxy 
 - Session-lost detection — banner prompts if the server restarted and the session mapping was cleared
 - Mobile-friendly layout (iOS safe-area, zoom-on-focus fix, slide-out sidebar)
 - Timestamp tooltips on message hover
-- No build step — vanilla JS, zero frontend dependencies beyond [marked.js](https://marked.js.org/) (bundled)
+- No build step — vanilla JS, two CDN dependencies ([marked.js](https://marked.js.org/) + [DOMPurify](https://github.com/cure53/DOMPurify)) with pinned SRI hashes
 
 ---
 

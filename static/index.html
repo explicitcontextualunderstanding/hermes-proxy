@@ -129,6 +129,8 @@
     #thread {
       flex: 1; overflow-y: auto; padding: 24px 16px;
       display: flex; flex-direction: column; gap: 16px;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
     }
     #thread::-webkit-scrollbar { width: 6px; }
     #thread::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -140,6 +142,8 @@
     .bubble {
       padding: 10px 14px; border-radius: 8px; line-height: 1.6;
       word-break: break-word;
+      -webkit-user-select: text; user-select: text;
+      touch-action: pan-y;
     }
     .msg.user .bubble {
       background: var(--user-bubble); border: 1px solid #2a5a3a;
