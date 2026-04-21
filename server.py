@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import json as _json
 import logging
@@ -36,7 +37,9 @@ if _ENV_PATH.exists():
 _HERMES_PROXY_PASSWORD = os.environ.get("HERMES_PROXY_PASSWORD", "")
 _API_SERVER_KEY = os.environ.get("API_SERVER_KEY", "")
 _API_SERVER_URL = os.environ.get("API_SERVER_URL", "http://127.0.0.1:8642")
-_STATE_DB_PATH = os.environ.get("STATE_DB_PATH", str(Path.home() / ".hermes" / "state.db"))
+_STATE_DB_PATH = os.environ.get(
+    "STATE_DB_PATH", str(Path.home() / ".hermes" / "state.db")
+)
 _SIGNING_KEY_HEX = os.environ.get("HERMES_PROXY_SIGNING_KEY", "")
 
 if not _HERMES_PROXY_PASSWORD:
@@ -51,25 +54,41 @@ try:
 except ValueError:
     raise RuntimeError("HERMES_PROXY_SIGNING_KEY must be a valid hex string")
 if len(_SIGNING_KEY) < 32:
-    raise RuntimeError("HERMES_PROXY_SIGNING_KEY must be at least 32 bytes (64 hex chars)")
+    raise RuntimeError(
+        "HERMES_PROXY_SIGNING_KEY must be at least 32 bytes (64 hex chars)"
+    )
 
 # ---------------------------------------------------------------------------
 # In-memory state
 # ---------------------------------------------------------------------------
-browser_sessions = {}       # type: dict  # cookie_token -> hermes_session_id
-_session_created: dict = {} # token -> float (time.time()) for TTL eviction
+browser_sessions = {}  # type: dict # cookie_token -> hermes_session_id
+_session_created: dict = {}  # token -> float (time.time()) for TTL eviction
+_session_lock = (
+    asyncio.Lock()
+)  # protects browser_sessions and _session_created mutations
 
-_SESSION_TTL = 2_592_000    # 30 days — matches cookie max_age
+_SESSION_TTL = 2_592_000  # 30 days — matches cookie max_age
+_MAX_BROWSER_SESSIONS = 100  # configurable max session limit (Phase 2)
 
 # Session ID format: hermes api_server produces "api-<16 hex chars>"
 # CLI sessions use "YYYYMMDD_HHMMSS_<6hex>". Allow word chars + hyphens, 8-80 chars.
-_SESSION_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{8,80}$')
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{8,80}$")
 
-# Rate limiting: { ip: {"count": int, "window_start": float} }
-_login_attempts = {}  # type: dict
-_RATE_LIMIT_MAX = 5
-_RATE_LIMIT_WINDOW = 60  # seconds
-_RATE_LIMIT_EVICT_AFTER = _RATE_LIMIT_WINDOW * 10  # evict entries older than 600s
+# Rate limiting configuration
+# Login attempts: strict limit for security
+_login_attempts = {}  # type: dict  # ip -> {"count": int, "window_start": float}
+_LOGIN_RATE_MAX = 5
+_LOGIN_RATE_WINDOW = 60  # seconds
+_LOGIN_RATE_EVICT_AFTER = _LOGIN_RATE_WINDOW * 10
+
+# Chat requests: separate bucket, allows burst for streaming
+_chat_requests = {}  # type: dict  # ip -> {"count": int, "window_start": float}
+_CHAT_RATE_MAX = 20  # burst allowance per minute (simplified model)
+_CHAT_RATE_WINDOW = 60  # seconds
+_CHAT_RATE_EVICT_AFTER = _CHAT_RATE_WINDOW * 10
+
+# SSE streaming: excluded from rate limiting (tracked separately for visibility)
+_sse_streams = {}  # type: dict  # ip -> {"count": int, "window_start": float} - for metrics only
 
 # ---------------------------------------------------------------------------
 # App
@@ -80,8 +99,10 @@ app = FastAPI()
 # Middleware
 # ---------------------------------------------------------------------------
 
+
 class _MaxBodyMiddleware(BaseHTTPMiddleware):
     """Reject POST bodies over 1 MB to prevent memory exhaustion."""
+
     async def dispatch(self, request, call_next):
         if request.method == "POST":
             content_length = request.headers.get("content-length")
@@ -92,6 +113,7 @@ class _MaxBodyMiddleware(BaseHTTPMiddleware):
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers to every response."""
+
     async def dispatch(self, request, call_next):
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
@@ -114,6 +136,7 @@ app.add_middleware(_MaxBodyMiddleware)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_token() -> str:
     """Generate a signed auth token: <random_hex>.<hmac_sig>"""
@@ -144,34 +167,88 @@ def _auth_error() -> JSONResponse:
     return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
 
-def _check_rate_limit(ip: str) -> bool:
-    """Return True if request is allowed, False if rate-limited."""
+def _check_login_rate_limit(ip: str) -> bool:
+    """Check rate limit for login attempts. Return True if allowed, False if rate-limited."""
     now = time.monotonic()
     # Opportunistically evict stale entries to prevent unbounded growth
-    stale = [k for k, e in _login_attempts.items()
-             if now - e["window_start"] > _RATE_LIMIT_EVICT_AFTER]
+    stale = [
+        k
+        for k, e in _login_attempts.items()
+        if now - e["window_start"] > _LOGIN_RATE_EVICT_AFTER
+    ]
     for k in stale:
         del _login_attempts[k]
     entry = _login_attempts.get(ip)
     if entry is None:
         _login_attempts[ip] = {"count": 1, "window_start": now}
         return True
-    if now - entry["window_start"] > _RATE_LIMIT_WINDOW:
+    if now - entry["window_start"] > _LOGIN_RATE_WINDOW:
         _login_attempts[ip] = {"count": 1, "window_start": now}
         return True
     entry["count"] += 1
-    if entry["count"] > _RATE_LIMIT_MAX:
+    if entry["count"] > _LOGIN_RATE_MAX:
         return False
     return True
 
 
-def _evict_stale_browser_sessions() -> None:
-    """Evict browser_sessions entries older than SESSION_TTL (30 days)."""
+def _check_chat_rate_limit(ip: str) -> tuple[bool, int]:
+    """Check rate limit for chat requests. Returns (allowed: bool, retry_after: int).
+    Separate bucket from login attempts. SSE streams are excluded from this limit.
+    """
+    now = time.monotonic()
+    # Opportunistically evict stale entries
+    stale = [
+        k
+        for k, e in _chat_requests.items()
+        if now - e["window_start"] > _CHAT_RATE_EVICT_AFTER
+    ]
+    for k in stale:
+        del _chat_requests[k]
+
+    entry = _chat_requests.get(ip)
+    if entry is None:
+        _chat_requests[ip] = {"count": 1, "window_start": now}
+        return True, 0
+
+    if now - entry["window_start"] > _CHAT_RATE_WINDOW:
+        _chat_requests[ip] = {"count": 1, "window_start": now}
+        return True, 0
+
+    entry["count"] += 1
+    if entry["count"] > _CHAT_RATE_MAX:
+        retry_after = int(_CHAT_RATE_WINDOW - (now - entry["window_start"]))
+        return False, max(retry_after, 1)
+
+    return True, 0
+
+
+def _evict_stale_browser_sessions() -> int:
+    """Evict browser_sessions entries older than SESSION_TTL (30 days).
+    Also evict oldest sessions if count exceeds _MAX_BROWSER_SESSIONS.
+    Returns number of sessions evicted.
+    """
+    evicted = 0
     cutoff = time.time() - _SESSION_TTL
     stale = [k for k, ts in _session_created.items() if ts < cutoff]
     for k in stale:
         browser_sessions.pop(k, None)
         _session_created.pop(k, None)
+        evicted += 1
+
+    # Evict oldest sessions if we exceed max limit (FIFO eviction)
+    while len(browser_sessions) > _MAX_BROWSER_SESSIONS:
+        # Find oldest session
+        oldest_token = min(_session_created.items(), key=lambda item: item[1])[0]
+        browser_sessions.pop(oldest_token, None)
+        _session_created.pop(oldest_token, None)
+        evicted += 1
+        logger.warning(
+            "Evicted oldest session due to max limit (%d). Total sessions: %d",
+            _MAX_BROWSER_SESSIONS,
+            len(browser_sessions),
+        )
+
+    return evicted
 
 
 def _set_auth_cookie(response: Response, token: str) -> None:
@@ -194,15 +271,16 @@ def _clear_auth_cookie(response: Response) -> None:
 # Auth routes
 # ---------------------------------------------------------------------------
 
+
 @app.post("/auth/login")
 async def auth_login(request: Request) -> Response:
     ip = request.client.host if request.client else "unknown"
-    if not _check_rate_limit(ip):
+    if not _check_login_rate_limit(ip):
         return JSONResponse({"error": "Too many attempts"}, status_code=429)
 
     try:
         body = await request.json()
-    except json.JSONDecodeError:
+    except _json.JSONDecodeError:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     except Exception as exc:
         logger.error("Unexpected error parsing login body: %s", exc)
@@ -222,10 +300,12 @@ async def auth_login(request: Request) -> Response:
 async def auth_logout(request: Request) -> Response:
     token = _get_token(request)
     if token:
-        browser_sessions.pop(token, None)
-        _session_created.pop(token, None)
+        async with _session_lock:
+            browser_sessions.pop(token, None)
+            _session_created.pop(token, None)
     response = JSONResponse({"ok": True})
-    _clear_auth_cookie(response)
+    if token:
+        _clear_auth_cookie(response)
     return response
 
 
@@ -239,7 +319,8 @@ async def session_validate(request: Request) -> Response:
     if not _is_authenticated(request):
         return _auth_error()
     token = _get_token(request)
-    session_id = browser_sessions.get(token) if token else None
+    async with _session_lock:
+        session_id = browser_sessions.get(token) if token else None
     return JSONResponse({"valid": session_id is not None, "session_id": session_id})
 
 
@@ -247,17 +328,28 @@ async def session_validate(request: Request) -> Response:
 # API routes
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/chat")
 async def api_chat(request: Request) -> Response:
     if not _is_authenticated(request):
         return _auth_error()
+
+    # Rate limiting for chat endpoint (separate from login rate limiting)
+    ip = request.client.host if request.client else "unknown"
+    allowed, retry_after = _check_chat_rate_limit(ip)
+    if not allowed:
+        return JSONResponse(
+            {"error": "Too many requests", "retry_after": retry_after},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
 
     _evict_stale_browser_sessions()
     token = _get_token(request)
 
     try:
         body = await request.json()
-    except json.JSONDecodeError:
+    except _json.JSONDecodeError:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     except Exception as exc:
         logger.error("Unexpected error parsing chat body: %s", exc)
@@ -270,14 +362,14 @@ async def api_chat(request: Request) -> Response:
         if session_id_override:
             if not _SESSION_ID_RE.match(str(session_id_override)):
                 return JSONResponse({"error": "Invalid session_id"}, status_code=400)
-            if token not in _session_created:
-                _session_created[token] = time.time()
-            browser_sessions[token] = session_id_override
+            async with _session_lock:
+                if token not in _session_created:
+                    _session_created[token] = time.time()
+                browser_sessions[token] = session_id_override
         else:
             # Explicit null = new session requested, clear the mapping
-            browser_sessions.pop(token, None)
-
-    hermes_session_id = browser_sessions.get(token)
+            async with _session_lock:
+                browser_sessions.pop(token, None)
 
     upstream_body = {
         "model": "hermes-agent",
@@ -289,6 +381,7 @@ async def api_chat(request: Request) -> Response:
         "Authorization": f"Bearer {_API_SERVER_KEY}",
         "Content-Type": "application/json",
     }
+    hermes_session_id = browser_sessions.get(token)
     if hermes_session_id:
         upstream_headers["X-Hermes-Session-Id"] = hermes_session_id
 
@@ -302,10 +395,10 @@ async def api_chat(request: Request) -> Response:
             ) as upstream_response:
                 new_session_id = upstream_response.headers.get("x-hermes-session-id")
                 if new_session_id and token:
-                    if token not in _session_created:
-                        _session_created[token] = time.time()
-                    browser_sessions[token] = new_session_id
-
+                    async with _session_lock:
+                        if token not in _session_created:
+                            _session_created[token] = time.time()
+                        browser_sessions[token] = new_session_id
                 async for chunk in upstream_response.aiter_bytes():
                     yield chunk
 
